@@ -1,4 +1,4 @@
-import { cleanEnv, str } from 'envalid'
+import { cleanEnv, num, str } from 'envalid'
 import dotenv from 'dotenv'
 import makeFetchCookie from 'fetch-cookie'
 
@@ -6,17 +6,34 @@ process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'
 dotenv.config()
 
 const env = cleanEnv(process.env, {
-    USER: str(),
-    PASSWORD: str(),
-    SUFFIX: str(),
+    UNIFI_USER: str(),
+    UNIFI_PASSWORD: str(),
+    UNIFI_URL: str({ default: 'https://192.168.1.1' }),
     PIHOLE_URL: str(),
     PIHOLE_PASSWORD: str(),
-    IGNORE_OLDER_THAN_DAYS: str({ default: '7' }),
-    CUSTOM_GROUP_1: str({ default: '' }),
-    CUSTOM_GROUP_2: str({ default: '' }),
-    CUSTOM_GROUP_3: str({ default: '' }),
-    CUSTOM_GROUP_4: str({ default: '' })
+    IGNORE_OLDER_THAN_DAYS: num({ default: 7 }),
+    SUFFIX: str(),
 })
+
+function isCustomGroupEntry(
+    entry: [string, string | undefined]
+): entry is [string, string] {
+    const [key, value] = entry
+    return (
+        /^CUSTOM_GROUP_\d+$/.test(key) &&
+        typeof value === 'string' &&
+        value.trim() !== ''
+    )
+}
+
+const customGroups = Object.entries(process.env)
+    .filter(isCustomGroupEntry)
+    .sort(
+        (a, b) =>
+            Number(a[0].split('_').pop() ?? 0) -
+            Number(b[0].split('_').pop() ?? 0)
+    )
+    .map(([, value]) => value.trim())
 
 const fetchCookie = makeFetchCookie(fetch)
 
@@ -32,6 +49,11 @@ async function piholeLogin() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ password: env.PIHOLE_PASSWORD })
     })
+
+    if (!res.ok) {
+        const body = await res.text()
+        throw new Error(`Pi-hole auth failed with ${res.status}: ${body}`)
+    }
 
     const json = await res.json()
     piholeAuth = {
@@ -119,22 +141,21 @@ function expandIpRange(range: string): string[] {
 
 const job = async () => {
     /* UniFi login */
-    await fetchCookie('https://192.168.1.1/api/auth/login', {
+    await fetchCookie(`${env.UNIFI_URL}/api/auth/login`, {
         method: 'POST',
-        body: JSON.stringify({ username: env.USER, password: env.PASSWORD }),
+        body: JSON.stringify({ username: env.UNIFI_USER, password: env.UNIFI_PASSWORD }),
         headers: { 'Content-Type': 'application/json' }
     })
 
-    const res = await fetchCookie(
-        'https://192.168.1.1/proxy/network/api/s/default/rest/user'
-    )
+    const res = await fetchCookie(`${env.UNIFI_URL}/proxy/network/api/s/default/rest/user`)
     const clients = (await res.json()).data
 
     console.log(`Retrieved ${clients.length} UniFi clients`)
 
     /* Desired DNS state */
     const desired = new Set<string>()
-    const ignoreOlderThan = Number(env.IGNORE_OLDER_THAN_DAYS)
+    const ignoreOlderThan = env.IGNORE_OLDER_THAN_DAYS
+    const cutoff = new Date(Date.now() - ignoreOlderThan * 86400000)
 
     for (const client of clients) {
         if (!client.name) continue
@@ -146,7 +167,7 @@ const job = async () => {
         if (
             lastSeen &&
             lastSeen <
-            new Date(Date.now() - ignoreOlderThan * 86400000)
+            cutoff
         ) {
             continue
         }
@@ -167,15 +188,8 @@ const job = async () => {
     }
 
     /* Custom IP groups */
-    const groups = [
-        env.CUSTOM_GROUP_1,
-        env.CUSTOM_GROUP_2,
-        env.CUSTOM_GROUP_3,
-        env.CUSTOM_GROUP_4
-    ].filter(Boolean)
-
-    for (const g of groups) {
-        const [name, range] = g.split(',')
+    for (const g of customGroups) {
+        const [name, range] = g.split(',').map(part => part.trim())
         if (!name || !range) continue
 
         for (const ip of expandIpRange(range)) {
