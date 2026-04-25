@@ -1,0 +1,5 @@
+Ensure Docker Desktop has been started
+
+docker login --username raydenl
+docker build --tag raydenl/unifi-exporter:latest --platform=linux/arm64 .
+docker push raydenl/unifi-exporter:latest

@@ -1,0 +1,23 @@
+{
+  "name": "unifi-exporter",
+  "version": "1.0.0",
+  "description": "",
+  "scripts": {
+    "start:dev": "nodemon index.ts",
+    "build": "tsc",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "dotenv": "^16.0.3",
+    "envalid": "^7.3.1",
+    "fetch-cookie": "^3.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "nodemon": "^3.1.7",
+    "typescript": "^4.9.5"
+  }
+}
