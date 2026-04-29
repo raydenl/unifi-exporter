@@ -88,7 +88,6 @@ async function getPiholeHosts(): Promise<Set<string>> {
     )
 }
 
-
 async function addHost(ip: string, domain: string) {
     const key = `${ip} ${domain}`
     const res = await piholeFetch(
@@ -114,6 +113,16 @@ async function deleteHost(ip: string, domain: string) {
 }
 
 /* ────────────────────────────────
+   UniFi helpers
+   ──────────────────────────────── */
+
+async function unifiGet(path: string) {
+    const res = await fetchCookie(`${env.UNIFI_URL}${path}`)
+    const json = await res.json()
+    return json.data ?? []
+}
+
+/* ────────────────────────────────
    IP range helper
    ──────────────────────────────── */
 
@@ -136,6 +145,17 @@ function expandIpRange(range: string): string[] {
 }
 
 /* ────────────────────────────────
+   Hostname normalisation
+   ──────────────────────────────── */
+
+function normaliseHostname(name: string): string {
+    return name
+        .replace(/ /g, '-')
+        .replace(/['’()]/g, '')
+        .toLowerCase()
+}
+
+/* ────────────────────────────────
    Main job
    ──────────────────────────────── */
 
@@ -143,48 +163,45 @@ const job = async () => {
     /* UniFi login */
     await fetchCookie(`${env.UNIFI_URL}/api/auth/login`, {
         method: 'POST',
-        body: JSON.stringify({ username: env.UNIFI_USER, password: env.UNIFI_PASSWORD }),
+        body: JSON.stringify({
+            username: env.UNIFI_USER,
+            password: env.UNIFI_PASSWORD
+        }),
         headers: { 'Content-Type': 'application/json' }
     })
 
-    const res = await fetchCookie(`${env.UNIFI_URL}/proxy/network/api/s/default/rest/user`)
-    const clients = (await res.json()).data
+    /* Fetch UniFi datasets */
+    const clients = await unifiGet('/proxy/network/api/s/default/rest/user')
+    const staClients = await unifiGet('/proxy/network/api/s/default/stat/sta')
 
-    console.log(`Retrieved ${clients.length} UniFi clients`)
+    console.log(
+        `Retrieved ${clients.length} UniFi clients + ${staClients.length} STA clients`
+    )
+
+    /* Build STA hostname → IP map */
+    const staIpMap = new Map<string, string>()
+
+    for (const sta of staClients) {
+        if (!sta.name || !sta.ip) continue
+        const hostname = normaliseHostname(sta.name)
+        staIpMap.set(hostname, sta.ip)
+    }
 
     /* Desired DNS state */
     const desired = new Set<string>()
-    const ignoreOlderThan = env.IGNORE_OLDER_THAN_DAYS
-    const cutoff = new Date(Date.now() - ignoreOlderThan * 86400000)
 
     for (const client of clients) {
         if (!client.name) continue
 
-        const lastSeen = client.last_seen
-            ? new Date(client.last_seen * 1000)
-            : undefined
+        const hostname = normaliseHostname(client.name)
 
-        if (
-            lastSeen &&
-            lastSeen <
-            cutoff
-        ) {
-            continue
-        }
+        const unifiIp = client.ip
+        const staIp = staIpMap.get(hostname)
 
-        const hostname = client.name
-            .replace(/ /g, '-')
-            .replace(/['’()]/g, '')
-            .toLowerCase()
+        const finalIp = staIp || unifiIp
+        if (!finalIp) continue
 
-        const ip =
-            client.fixed_ip && client.use_fixedip
-                ? client.fixed_ip
-                : client.last_ip
-
-        if (ip) {
-            desired.add(`${ip}|${hostname}${env.SUFFIX}`)
-        }
+        desired.add(`${finalIp}|${hostname}${env.SUFFIX}`)
     }
 
     /* Custom IP groups */
@@ -204,17 +221,11 @@ const job = async () => {
     for (const entry of existing) {
         const [ip, domain] = entry.split('|')
 
-        // Skip deletion if domain does NOT end with the managed suffix
-        if (!domain.endsWith(env.SUFFIX)) {
-            continue
-        }
-
-        // Only delete if it's managed AND not desired
+        if (!domain.endsWith(env.SUFFIX)) continue
         if (!desired.has(entry)) {
             await deleteHost(ip, domain)
         }
     }
-
 
     for (const entry of desired) {
         if (!existing.has(entry)) {
@@ -228,14 +239,14 @@ const job = async () => {
     )
 }
 
-    /* ──────────────────────────────── */
+/* ──────────────────────────────── */
 
-    ; (async () => {
-        console.log(`Job started at ${new Date().toISOString()}`)
-        try {
-            await job()
-        } catch (err) {
-            console.error('Job failed', err)
-        }
-        console.log(`Job finished at ${new Date().toISOString()}`)
-    })()
+;(async () => {
+    console.log(`Job started at ${new Date().toISOString()}`)
+    try {
+        await job()
+    } catch (err) {
+        console.error('Job failed', err)
+    }
+    console.log(`Job finished at ${new Date().toISOString()}`)
+})()
