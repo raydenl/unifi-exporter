@@ -15,7 +15,6 @@ const env = cleanEnv(process.env, {
     MQTT_URL: str(),
     MQTT_PORT: num({ default: 1883 }),
     MQTT_TOPIC: str({ default: 'unifi/speedtest' }),
-    IGNORE_OLDER_THAN_DAYS: num({ default: 7 }),
     SUFFIX: str(),
 })
 
