@@ -1,6 +1,7 @@
 import { cleanEnv, num, str } from 'envalid'
 import dotenv from 'dotenv'
 import makeFetchCookie from 'fetch-cookie'
+import mqtt from 'mqtt'
 
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'
 dotenv.config()
@@ -11,6 +12,9 @@ const env = cleanEnv(process.env, {
     UNIFI_URL: str({ default: 'https://192.168.1.1' }),
     PIHOLE_URL: str(),
     PIHOLE_PASSWORD: str(),
+    MQTT_URL: str(),
+    MQTT_PORT: num({ default: 1883 }),
+    MQTT_TOPIC: str({ default: 'unifi/speedtest' }),
     IGNORE_OLDER_THAN_DAYS: num({ default: 7 }),
     SUFFIX: str(),
 })
@@ -122,6 +126,128 @@ async function unifiGet(path: string) {
     return json.data ?? []
 }
 
+async function unifiLogin() {
+    await fetchCookie(`${env.UNIFI_URL}/api/auth/login`, {
+        method: 'POST',
+        body: JSON.stringify({
+            username: env.UNIFI_USER,
+            password: env.UNIFI_PASSWORD
+        }),
+        headers: { 'Content-Type': 'application/json' }
+    })
+}
+
+async function getSpeedtestResult() {
+    const data = await unifiGet('/proxy/network/api/s/default/stat/device')
+    const first = Array.isArray(data) ? data[0] ?? {} : {}
+    const speedtest = first['speedtest-status']
+
+    if (!speedtest || typeof speedtest !== 'object') {
+        return null
+    }
+
+    const rundateRaw = speedtest.rundate as string | number | undefined
+    const xput_download = speedtest.xput_download as number | string | undefined
+    const xput_upload = speedtest.xput_upload as number | string | undefined
+
+    if (rundateRaw === undefined || xput_download === undefined || xput_upload === undefined) {
+        return null
+    }
+
+    let rundate: string
+    if (typeof rundateRaw === 'number' || /^[0-9]+$/.test(String(rundateRaw))) {
+        const seconds = Number(rundateRaw)
+        const date = new Date(seconds * 1000)
+        if (Number.isNaN(date.getTime())) {
+            return null
+        }
+        rundate = date.toISOString()
+    } else {
+        rundate = String(rundateRaw)
+    }
+
+    return {
+        rundate,
+        xput_download,
+        xput_upload,
+    }
+}
+
+async function publishSpeedtestResult(result: {
+    rundate: string
+    xput_download: number | string
+    xput_upload: number | string
+}) {
+    return new Promise<void>((resolve, reject) => {
+        let brokerUrl = env.MQTT_URL.trim()
+        if (!/^[a-z][a-z0-9+\-.]*:/.test(brokerUrl)) {
+            brokerUrl = `mqtt://${brokerUrl}`
+        }
+
+        const url = new URL(brokerUrl)
+        if (!url.port) {
+            url.port = String(env.MQTT_PORT)
+        }
+        brokerUrl = url.toString().replace(/\/$/, '')
+
+        const client = mqtt.connect(brokerUrl)
+        const baseTopic = env.MQTT_TOPIC.replace(/\/+$|^\//g, '')
+
+        console.log('MQTT publish debug', {
+            brokerUrl,
+            baseTopic,
+            payloadTopics: [`${baseTopic}/rundate`, `${baseTopic}/download`, `${baseTopic}/upload`],
+        })
+
+        const payloads = [
+            { topic: `${baseTopic}/rundate`, payload: String(result.rundate) },
+            { topic: `${baseTopic}/download`, payload: String(result.xput_download) },
+            { topic: `${baseTopic}/upload`, payload: String(result.xput_upload) },
+        ]
+
+        let pending = payloads.length
+        let settled = false
+
+        const finish = (err?: Error) => {
+            if (settled) return
+            if (err) {
+                settled = true
+                client.end(true)
+                console.error('MQTT publish failed', err)
+                reject(err)
+                return
+            }
+
+            pending -= 1
+            if (pending === 0) {
+                settled = true
+                client.end(true)
+                console.log('MQTT publish complete')
+                resolve()
+            }
+        }
+
+        client.on('connect', () => {
+            console.log('MQTT connected', brokerUrl)
+            for (const { topic, payload } of payloads) {
+                client.publish(topic, payload, { qos: 1, retain: true }, err => {
+                    if (err) {
+                        console.error('MQTT publish error', { topic, err })
+                    } else {
+                        console.log('MQTT published', topic, payload)
+                    }
+                    finish(err ?? undefined)
+                })
+            }
+        })
+
+        client.on('error', err => {
+            console.error('MQTT client error', err)
+            finish(err)
+        })
+    })
+}
+
 /* ────────────────────────────────
    IP range helper
    ──────────────────────────────── */
@@ -156,20 +282,10 @@ function normaliseHostname(name: string): string {
 }
 
 /* ────────────────────────────────
-   Main job
+   Export clientsjob
    ──────────────────────────────── */
 
-const job = async () => {
-    /* UniFi login */
-    await fetchCookie(`${env.UNIFI_URL}/api/auth/login`, {
-        method: 'POST',
-        body: JSON.stringify({
-            username: env.UNIFI_USER,
-            password: env.UNIFI_PASSWORD
-        }),
-        headers: { 'Content-Type': 'application/json' }
-    })
-
+const exportClients = async () => {
     /* Fetch UniFi datasets */
     const clients = await unifiGet('/proxy/network/api/s/default/rest/user')
     const staClients = await unifiGet('/proxy/network/api/s/default/stat/sta')
@@ -195,10 +311,15 @@ const job = async () => {
 
         const hostname = normaliseHostname(client.name)
 
-        const unifiIp = client.ip
+        const unifiIp: string | undefined =
+            client.use_fixedip && client.fixed_ip
+                ? client.fixed_ip
+                : client.last_ip || undefined
+
         const staIp = staIpMap.get(hostname)
 
         const finalIp = staIp || unifiIp
+        
         if (!finalIp) continue
 
         desired.add(`${finalIp}|${hostname}${env.SUFFIX}`)
@@ -239,12 +360,24 @@ const job = async () => {
     )
 }
 
+const exportSpeedTestResults = async () => {
+    const speedtestResult = await getSpeedtestResult()
+    if (speedtestResult) {
+        await publishSpeedtestResult(speedtestResult)
+        console.log('Published speedtest result to MQTT', speedtestResult)
+    } else {
+        console.warn('Speedtest result not available from UniFi API')
+    }
+}
+
 /* ──────────────────────────────── */
 
 ;(async () => {
     console.log(`Job started at ${new Date().toISOString()}`)
     try {
-        await job()
+        await unifiLogin()
+        await exportClients()
+        await exportSpeedTestResults()
     } catch (err) {
         console.error('Job failed', err)
     }
