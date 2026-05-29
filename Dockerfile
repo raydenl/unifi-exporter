@@ -12,7 +12,7 @@ COPY . .
 RUN npm run build
 
 # Production
-FROM arm64v8/node:22-bookworm-slim AS release
+FROM arm64v8/node:22-alpine AS release
 
 WORKDIR /usr/src/app
 
@@ -22,8 +22,9 @@ RUN npm ci --omit=dev
 
 COPY --from=build /usr/src/app/dist ./dist
 
-# Ensure /usr/temp exists and create a blank file
-#RUN mkdir -p /usr/temp && touch /usr/temp/myhosts.list
+RUN chown -R node:node /usr/src/app
+
+USER node
 
 EXPOSE 8080
 
