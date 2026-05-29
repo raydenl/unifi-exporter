@@ -58,7 +58,7 @@ async function piholeLogin() {
         throw new Error(`Pi-hole auth failed with ${res.status}: ${body}`)
     }
 
-    const json = await res.json()
+    const json = await res.json() as { session: { sid: string; csrf: string } }
     piholeAuth = {
         sid: json.session.sid,
         csrf: json.session.csrf
@@ -79,7 +79,7 @@ function piholeFetch(path: string, options: any = {}) {
 
 async function getPiholeHosts(): Promise<Set<string>> {
     const res = await piholeFetch('/api/config/dns/hosts')
-    const json = await res.json()
+    const json = await res.json() as { config?: { dns?: { hosts?: string[] } } }
 
     const hosts: string[] = json?.config?.dns?.hosts ?? []
 
@@ -119,10 +119,10 @@ async function deleteHost(ip: string, domain: string) {
    UniFi helpers
    ──────────────────────────────── */
 
-async function unifiGet(path: string) {
+async function unifiGet(path: string): Promise<any[]> {
     const res = await fetchCookie(`${env.UNIFI_URL}${path}`)
-    const json = await res.json()
-    return json.data ?? []
+    const json = await res.json() as { data?: unknown }
+    return Array.isArray(json.data) ? json.data : []
 }
 
 async function unifiLogin() {

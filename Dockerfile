@@ -1,4 +1,4 @@
-FROM arm64v8/node:18-bookworm AS build
+FROM arm64v8/node:22-bookworm AS build
 
 WORKDIR /usr/src/app
 
@@ -12,7 +12,7 @@ COPY . .
 RUN npm run build
 
 # Production
-FROM arm64v8/node:18-bookworm-slim AS release
+FROM arm64v8/node:22-bookworm-slim AS release
 
 WORKDIR /usr/src/app
 
