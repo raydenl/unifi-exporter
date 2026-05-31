@@ -34,6 +34,6 @@ Thumbs.db
 .npm
 
 # Lock files (if not committing them intentionally)
-package-lock.json
-pnpm-lock.yaml
-yarn.lock
+#package-lock.json
+#pnpm-lock.yaml
+#yarn.lock
